@@ -1,0 +1,21 @@
+#!/usr/bin/runhaskell
+import Wisp.Types
+import Wisp.Reader
+import Wisp.Core
+import Wisp.Predicates
+import Wisp.Primitives
+
+import qualified Data.HashTable.IO as H
+import Data.ByteString.Char8 (pack)
+
+main = repl =<< toplevel
+
+repl f = do
+  l <- getLine
+  case parseWisp l of Left err -> putStrLn (show err)
+                      Right w -> do
+                        r <- unwrap $ eval w f return
+                        case r of Left err -> putStrLn err
+                                  Right v -> putStrLn (show v)
+  repl f
+                                 
