@@ -6,10 +6,10 @@ import Control.Applicative hiding ((<|>), many, optional)
 
 import Data.ByteString.Char8 (pack, unpack)
 
-parseWisp :: String -> Either ParseError Value
+parseWisp :: String -> Either ParseError (Value s)
 parseWisp = parse wisp ""
 
-wisp :: GenParser Char st Value
+wisp :: GenParser Char st (Value s)
 wisp = optional whitespace *> expr <* optional whitespace
   where
 

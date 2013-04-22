@@ -1,65 +1,62 @@
+{-# LANGUAGE RankNTypes, TupleSections #-}
 module Wisp.Types
-( Wisp(..)
+( Wisp
+, Env(..)
 , Symbol
 , Value(..)
 , Frame(..)
 , Form(..)
 , wispErr
-, wispIO
+, wispST
 , pack
 , unpack
 , ArgSpec(..)
-, Cont
 , Continue
 , anyNumber
 ) where
 
-import qualified Data.HashTable.IO as H
+import qualified Data.HashTable.ST.Cuckoo as HT
 import Data.ByteString (ByteString)
 import Data.ByteString.Char8 (pack, unpack)
+import Control.Monad.ST
+import Control.Monad.RWS.Strict
 
 
-type Cont = Value -> Wisp Value
-type Continue = Cont -> Wisp Value
+type Continue s = (Value s -> Wisp s (Value s)) -> Wisp s (Value s)
 
 type Symbol = ByteString
 
-newtype Wisp a = Wisp { unwrap :: IO (Either String a) }
+type Wisp s a = RWST (Env s) String (Frame s) (ST s) a
 
-instance Functor Wisp where
-  fmap f (Wisp v) = Wisp $ fmap (fmap f) v
+data Env s = Env { input :: String
+                 , abort :: String -> Wisp s (Value s)
+                 }
 
-instance Monad Wisp where
-  return = Wisp . return . return
-  Wisp v >>= f = Wisp $ v >>= \r -> case r of
-    Left err -> return $ Left err
-    Right r' -> unwrap $ f r'
+wispErr e = asks abort >>= ($e)
+wispST st = RWST $ \_ tl -> fmap (,tl,[]) st
 
-wispErr = Wisp . return . Left
-wispIO = Wisp . fmap return
-
-data ArgSpec = Exactly { count :: Int, guards :: [Value -> Bool]}
-             | AtLeast { count :: Int, guards :: [Value -> Bool]}
+data ArgSpec = Exactly { count :: Int, guards :: forall s. [Value s -> Bool]}
+             | AtLeast { count :: Int, guards :: forall s. [Value s -> Bool]}
 
 anyNumber = AtLeast 0
 
-data Frame = F { parent :: Maybe Frame
-               , bindings :: H.BasicHashTable Symbol Value
-               }
+data Frame s = F { parent :: Maybe (Frame s)
+                 , bindings :: HT.HashTable s Symbol (Value s)
+                 }
 
-data Value = Int Int
-           | Lst [Value]
+data Value s = Int Int
+           | Lst [Value s]
            | Sym Symbol 
            | Bln Bool
            | Str String
            | Flt Double
-           | Fn { params  :: [Value]
+           | Fn { params  :: [Value s]
                 , isMacro :: Bool
-                , body    :: Value
-                , closure :: Frame
+                , body    :: Value s
+                , closure :: Frame s
                 }
            | Prim { argSpec :: ArgSpec
-                  , call    :: [Value] -> Frame -> Continue
+                  , call    :: [Value s] -> Continue s
                   }
            | SF Form
 
@@ -79,7 +76,7 @@ instance Show Form where
   show Undef      = "undef"
   show Catch      = "catch"
 
-instance Show Value where
+instance Show (Value s) where
   show (Int i) = show i
   show (Flt f) = show f
   show (Bln b) = if b then "#t" else "#f"
@@ -90,7 +87,7 @@ instance Show Value where
   show (Prim as _) = "#<fn/" ++ show (count as) ++ ">"
   show (Fn{params = ps}) = "#<fn/" ++ show (length ps) ++ ">"
 
-instance Eq Value where
+instance Eq (Value s) where
   Int a == Int b = a == b
   Lst a == Lst b = a == b
   Sym a == Sym b = a == b
@@ -105,5 +102,4 @@ instance Eq Value where
 instance Show ArgSpec where
   show (Exactly n _) = "exactly "  ++ show n
   show (AtLeast n _) = "at least " ++ show n
-
 

@@ -77,11 +77,11 @@ lists      = repeat list
 primitives = repeat primitive
 arguments  = []
 
-satisfied :: Value -> Bool
+satisfied :: Value s -> Bool
 satisfied Prim{argSpec = as} = count as == 0
 satisfied Fn{params = ps} = length ps == 0
 
-admits :: ArgSpec -> Value -> Bool
+admits :: ArgSpec -> Value s -> Bool
 Exactly 0 _ `admits` _ = False
 spec `admits` arg
  | null $ guards spec = True

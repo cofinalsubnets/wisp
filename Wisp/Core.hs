@@ -1,67 +1,114 @@
-{-# LANGUAGE PatternGuards #-}
+{-# LANGUAGE TupleSections, RankNTypes #-}
 module Wisp.Core
-( lookup
-, eval
+( eval
 , apply
+, lookup
 ) where
 
 import Wisp.Types
 import Wisp.Predicates
 import Prelude hiding (lookup)
-import qualified Data.HashTable.IO as H
-import Control.Monad (foldM)
+import qualified Data.HashTable.ST.Cuckoo as H
+import Data.HashTable.Class (fromList)
+import Control.Monad
+import Control.Monad.ST
+import Control.Monad.RWS
 
--- | name resolution
-lookup :: Symbol -> Frame -> Wisp Value
-lookup k = lu . Just
-  where
-    lu Nothing = wispErr $ "Unable to resolve symbol: " ++ unpack k
-    lu (Just f) = wispIO (H.lookup (bindings f) k) >>= maybe (lu $ parent f) return
 
-eval :: Value -> Frame -> Continue
+
+eval :: Value s -- the thing being evaluated
+     -> Frame s -- the evaluation context
+     -> Continue s
 eval v f cont = case v of
  Sym s -> cont =<< lookup s f
  Lst ((SF m):ps) -> specialForm m ps f cont
  Lst (o:ps) -> eval o f $ \o' ->
-   if macro o' then apply o' ps f $ \r -> eval r f cont
-   else let c' [] ps'     = apply o' (reverse ps') f cont
-            c' (a:as) ps' = eval a f $ \a' -> c' as (a':ps')
-        in c' ps []
+   if macro o' then apply o' ps $ \r -> eval r f cont
+   else let evalArgs []     ps' = apply o' (reverse ps') cont
+            evalArgs (a:as) ps' = eval a f $ \a' -> evalArgs as (a':ps')
+        in evalArgs ps []
  _ -> cont v
 
-apply :: Value -> [Value] -> Frame -> Continue
-apply proc args frame cont
- | primitive proc = foldM apC proc args >>= invoke frame cont
+
+apply :: Value s   -- the value being applied
+      -> [Value s] -- the arguments
+      -> Continue s
+apply proc args cont
+ | primitive proc = foldM apC proc args >>= \p -> invoke p cont
  | applicable proc = case destructure (Lst bound) (Lst args) of
    Left err -> wispErr err
    Right kvs -> do
      f <- mkFrame (Just $ closure proc) kvs
-     invoke frame cont proc{params = drop (length bound) $ params proc, closure = f}
+     invoke proc{params = unbound, closure = f} cont
  | otherwise = wispErr $ "Non-applicable value: " ++ show proc
 
  where
-
-    (pos, var) = break (== splat) $ params proc
-    (bound, unbound) = if length args >= length pos then (params proc,[])
+    (bound, unbound) = if length args >= nPos then (params proc,[])
                        else splitAt (length args) (params proc)
+    nPos = length . fst . posVarArgs $ params proc
 
-    invoke f c pr
-     | satisfied pr = case pr of
-       Prim{} -> call pr [] f c
-       Fn{closure = cl, body = b} -> eval b cl c
-     | otherwise = c pr
 
-    Prim {argSpec = as, call = p} `apC` arg
-     | as `admits` arg = return Prim {argSpec = nextSpec as, call = p . (arg:)}
-     | otherwise = wispErr $ "Bad type: " ++ show arg
+-- | Name resolution.
+lookup :: Symbol -> Frame s -> Wisp s (Value s)
+lookup k = maybe nameError (return . fst) <=< findBinding k
+  where nameError = wispErr $ "Unable to resolve symbol: " ++ unpack k
 
-    nextSpec s = s{count = max 0 (pred $ count s), guards = drop 1 $ guards s}
 
-    mkFrame p bs = Wisp $ H.fromList bs >>= \ht -> return (return $ F p ht)
+-- helper fns
+
+-- | Traverse a binding pattern together with a set of values, an return
+-- a list of bindings or an error.
+destructure :: Value s -- the binding pattern
+            -> Value s -- the values to be bound
+            -> Either String [(Symbol, Value s)] -- an error or a list of bindings
+destructure (Sym s) v = Right [(s,v)]
+destructure l0@(Lst l) v0@(Lst v) 
+ | (req, Just s) <- posVarArgs l = do
+   let (pn,vn) = splitAt (length req) v
+   pos <- destructure (Lst req) (Lst pn)
+   fmap (++pos) $ destructure s (Lst vn)
+ | length l == length v = fmap concat . sequence $ zipWith destructure l v
+ | otherwise = structError l0 v0
+destructure p v = structError p v
+
+structError p v = Left . unwords $
+  [ "Pattern error: structure mismatch:" , show p , "<-" , show v ]
+
+
+-- | Search for a binding visible from a frame. Return the value and the
+-- frame in which it is bound, or Nothing.
+findBinding nm f = wispST (H.lookup (bindings f) nm)
+               >>= maybe iter (return . return . (,f))
+  where iter = maybe (return Nothing) (findBinding nm) (parent f)
+
+-- | Return the positional & variadic parameters of a parameter list.
+-- If multiple variadic parameters are supplied, ignores all but the first
+-- one.
+posVarArgs p = case break (== Sym (pack "&")) p of
+  (ps,_:v:_) -> (ps, Just v)
+  (ps,_)     -> (ps, Nothing)
+
+invoke pr
+ | satisfied pr = case pr of
+   Prim{} -> call pr []
+   Fn{closure = cl, body = b} -> eval b cl
+ | otherwise = ($pr)
+
+Prim as p `apC` arg
+ | as `admits` arg = return $ Prim (nextSpec as) (p . (arg:))
+ | otherwise = wispErr $ "Bad type: " ++ show arg
+
+nextSpec s = s {count = max 0 (pred $ count s), guards = drop 1 $ guards s}
+
+mkFrame p = wispST . fromList >=> return . F p
+
 
 -- SPECIAL FORMS
 
-specialForm :: Form -> [Value] -> Frame -> Continue
+specialForm :: Form       -- the special form
+            -> [Value s]  -- the arguments
+            -> Frame s    -- the calling context
+            -> Continue s
 
 specialForm Do [p] f c = eval p f c
 specialForm Do (p:ps) f c = eval p f $ \_ -> specialForm Do ps f c
@@ -76,9 +123,9 @@ specialForm Quote [v] _ c = c v
 
 specialForm Quasiquote [val] f cont = spliceV val cont
   where
-    spliceV (Lst [SF Splice, v]) c = eval v f c
-    spliceV (Lst l) c = spliceL l [] c
-    spliceV v c = c v
+    spliceV (Lst [SF Splice, v]) = eval v f
+    spliceV (Lst l) = spliceL l []
+    spliceV v = ($v)
     spliceL [] l' c = c $ Lst l'
     spliceL ((Lst l):t) vs c
      | [SF Merge,  v] <- l = eval v f $ \v' -> case v' of
@@ -90,58 +137,17 @@ specialForm Quasiquote [val] f cont = spliceV val cont
 specialForm Splice _ _ _ = wispErr "ERROR: splice outside quasiquoted expression"
 specialForm Merge _ _ _ = wispErr "ERROR: merge outside quasiquoted expression"
 
-specialForm Def [s, xp] f c = eval xp f $ \v ->
-  case destructure s v of
-    Left err -> wispErr err
-    Right kvs -> wispIO (mapM_ (uncurry $ H.insert $ bindings f) kvs) >> c v
+specialForm Def [s, xp] f c = eval xp f $ \v -> case destructure s v of
+  Right kvs -> wispST (mapM_ (uncurry $ H.insert $ bindings f) kvs) >> c v
+  Left err -> wispErr err
 
 specialForm Set [Sym s, xp] f c = findBinding s f >>= \tf -> case tf of
-  Just tf' -> eval xp f $ \v -> do
-    wispIO $ H.insert (bindings tf') s v
-    c v
+  Just (_,tf') -> eval xp f $ \v -> wispST (H.insert (bindings tf') s v) >> c v
   _ -> wispErr $ "ERROR: set: free or immutable variable: " ++ unpack s
 
 specialForm Undef [Sym s] f c = findBinding s f >>= \tf -> case tf of
-  Just tf' -> do
-    wispIO $ H.delete (bindings tf') s
-    c $ Bln True
+  Just (_,tf') -> wispST (H.delete (bindings tf') s) >> c (Bln True)
   _ -> wispErr $ "ERROR: undef: free or immutable variable: " ++ unpack s
 
-specialForm Catch (h:xp) f c = do
-  res <- wispIO $ do
-    r <- unwrap $ eval (Lst $ (SF Do):xp) f return
-    case r of Right r' -> return $ c r'
-              Left err -> return $ eval h f $ \h' -> apply h' [Str err] f c
-  res
-
 specialForm sf ps _ _ = wispErr $ "ERROR: syntax error in special form: " ++ show (Lst $ (SF sf):ps)
-
-
-findBinding :: Symbol -> Frame -> Wisp (Maybe Frame)
-findBinding nm f = maybe iter (\_ -> return $ return f) =<< wispIO (H.lookup (bindings f) nm)
-  where iter = maybe (return Nothing) (findBinding nm) (parent f)
-
--- LIST DESTRUCTURING
-
-destructure :: Value -> Value -> Either String [(Symbol, Value)]
-
-destructure (Sym s) v = Right [(s,v)]
-
-destructure (Lst l) (Lst v) 
-  | (req, (_:o)) <- break (== splat) l = do
-    let ps = length req
-    pos <- destructure (Lst req) (Lst $ take ps v)
-    case o of [s] -> fmap (pos ++) $ destructure s (Lst $ drop ps v)
-              s -> Left $ "Pattern error: bad splat: " ++ show (Lst l)
-  | length l == length v = fmap concat . sequence $ zipWith destructure l v
-  | otherwise = structError (Lst l) (Lst v)
-
-destructure l@(Lst _) v = structError l v
-
-destructure p _ = Left $ "Pattern error: illegal pattern: " ++ show p
-
-structError l v = Left . unwords $
-  [ "Pattern error: structure mismatch:" , show l , "<-" , show v ]
-
-splat = Sym $ pack "&"
 
