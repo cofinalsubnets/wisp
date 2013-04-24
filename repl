@@ -1,20 +1,7 @@
 #!/usr/bin/runhaskell
-import Wisp.Types
-import Wisp.Reader
-import Wisp.Core
-import Wisp.Predicates
-import Wisp.Primitives
-import Control.Monad.ST
-import Control.Monad.RWS
+import Wisp
+import System.IO
 
 
-main = repl =<< stToIO newEnv
+main = repl stdin stdout "> " Nothing
 
-repl f = do
-  l <- getLine
-  case parseWisp l of Left err -> putStrLn (show err)
-                      Right w -> do
-                        (r,_) <- stToIO $ evalRWST (eval w f return) (Env [] (return . Str)) f
-                        putStrLn (show r)
-  repl f
-                                 

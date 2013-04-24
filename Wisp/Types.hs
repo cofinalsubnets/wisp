@@ -19,21 +19,24 @@ import qualified Data.HashTable.ST.Cuckoo as HT
 import Data.ByteString (ByteString)
 import Data.ByteString.Char8 (pack, unpack)
 import Control.Monad.ST
-import Control.Monad.RWS.Strict
+import Control.Monad.Reader
+import System.IO
 
 
 type Continue s = (Value s -> Wisp s (Value s)) -> Wisp s (Value s)
 
 type Symbol = ByteString
 
-type Wisp s a = RWST (Env s) String (Frame s) (ST s) a
+type Wisp s a = ReaderT (Env s) (ST s) a
 
-data Env s = Env { input :: String
+type WispIO a = Wisp RealWorld a
+
+data Env s = Env { toplevel :: Frame s
                  , abort :: String -> Wisp s (Value s)
                  }
 
 wispErr e = asks abort >>= ($e)
-wispST st = RWST $ \_ tl -> fmap (,tl,[]) st
+wispST = ReaderT . const
 
 data ArgSpec = Exactly { count :: Int, guards :: forall s. [Value s -> Bool]}
              | AtLeast { count :: Int, guards :: forall s. [Value s -> Bool]}

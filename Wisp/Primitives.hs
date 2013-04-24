@@ -1,5 +1,5 @@
 {-# LANGUAGE RankNTypes, PatternGuards #-}
-module Wisp.Primitives (newEnv) where
+module Wisp.Primitives (mkToplevel) where
 
 import Prelude hiding (lookup)
 import Wisp.Types
@@ -8,18 +8,17 @@ import Wisp.Core
 import Wisp.Reader
 import Wisp.STL
 import Control.Monad
-import Control.Monad.RWS.Strict
+import Control.Monad.ST
+import Control.Monad.Reader
 import Data.HashTable.Class (fromList)
 import qualified Data.HashTable.ST.Cuckoo as H
 import System.IO
 
-newEnv = do
+mkToplevel :: ST s (Frame s)
+mkToplevel = do
   base <- return . F Nothing =<< bs
-  case parseWisp stl of
-    Left err -> error $ show err
-    Right t -> do
-      let env = Env "" error
-      fmap fst $ execRWST (eval t base return) env base
+  runReaderT (eval stl base return) $ Env base (error . show)
+  return base
   where
     bs = fromList $
       [ (pack "+",          math (+))
@@ -45,8 +44,6 @@ newEnv = do
       , (pack "macro?",     check macro )
       , (pack "<",          p_lt)
       , (pack "call/cc",    p_call_cc)
-      , (pack "get-line",   p_get_line)
-      , (pack "print",      p_print)
       , (pack "read",       p_read)
       ]
 
@@ -85,8 +82,9 @@ p_eq = Prim (anyNumber arguments)
 -- | apply
 p_apply = Prim (Exactly 2 [applicable, list]) $ \[a, Lst l] -> apply a l
 
-p_eval = Prim (Exactly 1 arguments) $ \[v] c -> RWST $ \i tl -> 
-  runRWST (eval v tl c) i tl
+p_eval = Prim (Exactly 1 arguments) $ \[v] c -> do
+  tl <- asks toplevel
+  eval v tl c
 
 -- | integer coercion
 p_int = Prim (Exactly 1 numbers) $ ylppa . intg
@@ -110,24 +108,12 @@ p_div = Prim (AtLeast 1 numbers) $ \(h:t) c -> case foldM s_div h t of
   Left err -> wispErr err
   Right v -> c v
 
-p_get_line = Prim (Exactly 0 arguments) $ \_ c -> do
-  e <- ask
-  case break (=='\n') $ input e of
-    (l, _:i') -> local (const $ e{input = i'}) (c $ Str l)
-    _ -> wispErr $ "ERROR: get-line: end of input"
-
-p_print = Prim (Exactly 1 strings) $ \[Str s] c -> do
-  tell s
-  c $ Str s
-
 p_read = Prim (Exactly 1 strings) $ \[Str s] c -> case parseWisp s of
   Left err -> wispErr $ show err
   Right v -> c v
  
 
--- Primitive fns and special forms
-
--- | polymorphic binary math op application. handles coercion between numeric
+-- polymorphic binary math op application. handles coercion between numeric
 -- types
 s_num_op :: (forall a. Num a => a -> a -> a) -> Value s -> Value s -> Value s
 s_num_op (?) s1 s2 = case (s1,s2) of
@@ -141,7 +127,7 @@ s_div :: Value s -> Value s -> Either String (Value s)
 s_div s1 s2
  | s2 == Int 0 || s2 == Flt 0 = Left "ERROR: divide by zero"
  | otherwise = return $ case (s1,s2) of
-   (Int a, Int b) -> Int $ a `quot` b
+   (Int a, Int b) -> Int $ quot a b
    (Int a, Flt b) -> Flt $ fromIntegral a / b
    (Flt a, Int b) -> Flt $ a / fromIntegral b
    (Flt a, Flt b) -> Flt $ a / b

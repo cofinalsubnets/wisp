@@ -1,4 +1,4 @@
-{-# LANGUAGE TupleSections, RankNTypes #-}
+{-# LANGUAGE TupleSections #-}
 module Wisp.Core
 ( eval
 , apply
@@ -13,7 +13,6 @@ import Data.HashTable.Class (fromList)
 import Control.Monad
 import Control.Monad.ST
 import Control.Monad.RWS
-
 
 
 eval :: Value s -- the thing being evaluated
@@ -43,9 +42,23 @@ apply proc args cont
  | otherwise = wispErr $ "Non-applicable value: " ++ show proc
 
  where
-    (bound, unbound) = if length args >= nPos then (params proc,[])
-                       else splitAt (length args) (params proc)
-    nPos = length . fst . posVarArgs $ params proc
+  (bound, unbound) = if length args >= nPos then (params proc,[])
+                     else splitAt (length args) (params proc)
+  nPos = length . fst . posVarArgs $ params proc
+
+  invoke pr
+   | satisfied pr = case pr of
+     Prim{} -> call pr []
+     Fn{closure = cl, body = b} -> eval b cl
+   | otherwise = ($pr)
+
+  Prim as p `apC` arg
+   | as `admits` arg = return $ Prim nextSpec (p . (arg:))
+   | otherwise = wispErr $ "Bad type: " ++ show arg
+   where
+     nextSpec = as{count = max 0 (pred $ count as), guards = drop 1 $ guards as}
+
+  mkFrame p = wispST . fromList >=> return . F p
 
 
 -- | Name resolution.
@@ -77,6 +90,7 @@ structError p v = Left . unwords $
 
 -- | Search for a binding visible from a frame. Return the value and the
 -- frame in which it is bound, or Nothing.
+findBinding :: Symbol -> Frame s -> Wisp s (Maybe (Value s, Frame s))
 findBinding nm f = wispST (H.lookup (bindings f) nm)
                >>= maybe iter (return . return . (,f))
   where iter = maybe (return Nothing) (findBinding nm) (parent f)
@@ -84,23 +98,10 @@ findBinding nm f = wispST (H.lookup (bindings f) nm)
 -- | Return the positional & variadic parameters of a parameter list.
 -- If multiple variadic parameters are supplied, ignores all but the first
 -- one.
+posVarArgs :: [Value s] -> ([Value s], Maybe (Value s))
 posVarArgs p = case break (== Sym (pack "&")) p of
   (ps,_:v:_) -> (ps, Just v)
   (ps,_)     -> (ps, Nothing)
-
-invoke pr
- | satisfied pr = case pr of
-   Prim{} -> call pr []
-   Fn{closure = cl, body = b} -> eval b cl
- | otherwise = ($pr)
-
-Prim as p `apC` arg
- | as `admits` arg = return $ Prim (nextSpec as) (p . (arg:))
- | otherwise = wispErr $ "Bad type: " ++ show arg
-
-nextSpec s = s {count = max 0 (pred $ count s), guards = drop 1 $ guards s}
-
-mkFrame p = wispST . fromList >=> return . F p
 
 
 -- SPECIAL FORMS
