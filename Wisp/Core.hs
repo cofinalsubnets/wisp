@@ -11,16 +11,15 @@ import Prelude hiding (lookup)
 import qualified Data.HashTable.ST.Cuckoo as H
 import Data.HashTable.Class (fromList)
 import Control.Monad
-import Control.Monad.ST
-import Control.Monad.RWS
+import Control.Monad.Reader
 
 
 eval :: Value s -- the thing being evaluated
      -> Frame s -- the evaluation context
      -> Continue s
 eval v f cont = case v of
- Sym s -> cont =<< lookup s f
- Lst ((SF m):ps) -> specialForm m ps f cont
+ Sym s -> lookup s f cont
+ Lst (SF m:ps) -> specialForm m ps f cont
  Lst (o:ps) -> eval o f $ \o' ->
    if macro o' then apply o' ps $ \r -> eval r f cont
    else let evalArgs []     ps' = apply o' (reverse ps') cont
@@ -33,13 +32,13 @@ apply :: Value s   -- the value being applied
       -> [Value s] -- the arguments
       -> Continue s
 apply proc args cont
- | primitive proc = foldM apC proc args >>= \p -> invoke p cont
+ | primitive proc = apC proc args
  | applicable proc = case destructure (Lst bound) (Lst args) of
    Left err -> wispErr err
    Right kvs -> do
      f <- mkFrame (Just $ closure proc) kvs
      invoke proc{params = unbound, closure = f} cont
- | otherwise = wispErr $ "Non-applicable value: " ++ show proc
+ | otherwise = wispErr $ "ERROR: non-applicable value: " ++ show proc
 
  where
   (bound, unbound) = if length args >= nPos then (params proc,[])
@@ -52,9 +51,11 @@ apply proc args cont
      Fn{closure = cl, body = b} -> eval b cl
    | otherwise = ($pr)
 
-  Prim as p `apC` arg
-   | as `admits` arg = return $ Prim nextSpec (p . (arg:))
-   | otherwise = wispErr $ "Bad type: " ++ show arg
+  p `apC` [] = invoke p cont
+
+  Prim as p `apC` (arg:args)
+   | as `admits` arg = Prim nextSpec (p . (arg:)) `apC` args
+   | otherwise = wispErr $ "ERROR: bad type: " ++ show arg
    where
      nextSpec = as{count = max 0 (pred $ count as), guards = drop 1 $ guards as}
 
@@ -62,9 +63,10 @@ apply proc args cont
 
 
 -- | Name resolution.
-lookup :: Symbol -> Frame s -> Wisp s (Value s)
-lookup k = maybe nameError (return . fst) <=< findBinding k
-  where nameError = wispErr $ "Unable to resolve symbol: " ++ unpack k
+lookup :: Symbol -> Frame s -> Continue s
+lookup k f c = findBinding k f >>= maybe nameError (c . fst)
+  where
+    nameError = wispErr $ "ERROR: unable to resolve symbol: " ++ unpack k
 
 
 -- helper fns
@@ -104,8 +106,7 @@ posVarArgs p = case break (== Sym (pack "&")) p of
   (ps,_)     -> (ps, Nothing)
 
 
--- SPECIAL FORMS
-
+-- | Special form handler.
 specialForm :: Form       -- the special form
             -> [Value s]  -- the arguments
             -> Frame s    -- the calling context
@@ -117,8 +118,8 @@ specialForm Do (p:ps) f c = eval p f $ \_ -> specialForm Do ps f c
 specialForm If [cond,y,n] f c = eval cond f $ \res ->
   eval (if res == Bln False then n else y) f c
 
-specialForm Lambda ((Lst ps):b) f c = c $ Fn ps False (Lst $ (SF Do):b) f
-specialForm Macro  ((Lst ps):b) f c = c $ Fn ps True  (Lst $ (SF Do):b) f
+specialForm Lambda (Lst ps:b) f c = c $ Fn ps False (Lst $ SF Do:b) f
+specialForm Macro  (Lst ps:b) f c = c $ Fn ps True  (Lst $ SF Do:b) f
 
 specialForm Quote [v] _ c = c v
 
@@ -129,7 +130,7 @@ specialForm Quasiquote [val] f cont = spliceV val cont
     spliceV v = ($v)
     spliceL [] l' c = c $ Lst l'
     spliceL ((Lst l):t) vs c
-     | [SF Merge,  v] <- l = eval v f $ \v' -> case v' of
+     | [SF Merge, v] <- l = eval v f $ \v' -> case v' of
        Lst l' -> spliceL t (vs ++ l') c
        _ -> wispErr $ "ERROR: can't merge non-list: " ++ show v'
      | otherwise = spliceV (Lst l) $ \l' -> spliceL t (vs ++ [l']) c
@@ -149,6 +150,10 @@ specialForm Set [Sym s, xp] f c = findBinding s f >>= \tf -> case tf of
 specialForm Undef [Sym s] f c = findBinding s f >>= \tf -> case tf of
   Just (_,tf') -> wispST (H.delete (bindings tf') s) >> c (Bln True)
   _ -> wispErr $ "ERROR: undef: free or immutable variable: " ++ unpack s
+
+specialForm Catch (handler:xps) f c = eval handler f $ \h ->
+  let h' e = apply h [Str e] c in
+  local (\e -> e{abort=h'}) $ eval (Lst $ SF Do:xps) f c
 
 specialForm sf ps _ _ = wispErr $ "ERROR: syntax error in special form: " ++ show (Lst $ (SF sf):ps)
 

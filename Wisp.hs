@@ -1,54 +1,42 @@
+-- simple embedded wisp interpreters
 module Wisp
 ( interpreter
 , interpreter'
-, repl
 ) where
 
 import Wisp.Types
 import Wisp.Core
 import Wisp.Primitives
 import Wisp.Reader
-import Control.Monad
 import Control.Monad.ST
 import Control.Monad.Reader
-import Text.ParserCombinators.Parsec (ParseError)
-import System.IO
-import System.Timeout
+import Control.Monad.Writer
+import System.Random
 
-type Interpreter m s = String -> m (Either ParseError (Value s))
+type Interpreter m = String -> m String
 
-interpreter' :: ST s (Interpreter (ST s) s)
-interpreter' = do
+
+interpreter' :: StdGen -> ST s (Interpreter (ST s))
+interpreter' gen = do
   tl <- mkToplevel
-  let env    = Env tl (return . Str)
-      terp v = runReaderT (eval v tl return) env
-  return $ \s -> case parseWisp s of
-    Left err  -> return $ Left err
-    Right v   -> fmap return $ terp v
+  let env = Env tl reportError "" gen
+      Right val = parseWisp "(fn (s) (print (str (eval (read s)))))"
 
-interpreter :: IO (Interpreter IO RealWorld)
-interpreter = stToIO $ interpreter' >>= return . (stToIO .)
+  (rep,_) <- runWriterT $ runReaderT (eval val tl return) env
 
-repl :: Handle -> Handle -> String -> Maybe Int -> IO ()
-repl i o p w = do
-  terp <- interpreter
-  case w of
-    Nothing -> forever $ iter terp
-    Just t -> withTimeout t terp
+  let terp v = fmap snd . runWriterT $ runReaderT (apply rep [Str v] return) env
+  return terp
+
   where
-    iter terp = do
-      hPutStr o p
-      hFlush o
-      l <- hGetLine i
-      when (l /= "") $ do
-        res <- terp l
-        hPutStrLn o $ case res of
-          Left e -> show e
-          Right v -> show v
-        hFlush o
-    withTimeout t terp = do
-      l <- timeout t $ iter terp
-      case l of
-        Nothing -> return ()
-        Just _ -> withTimeout t terp
-        
+
+    reportError s = do
+      tell s
+      return $ Str s
+
+
+interpreter :: IO (Interpreter IO)
+interpreter = do
+  gen <- newStdGen
+  terp <- stToIO $ interpreter' gen
+  return $ stToIO . terp
+

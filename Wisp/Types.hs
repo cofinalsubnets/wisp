@@ -20,23 +20,25 @@ import Data.ByteString (ByteString)
 import Data.ByteString.Char8 (pack, unpack)
 import Control.Monad.ST
 import Control.Monad.Reader
-import System.IO
+import Control.Monad.Writer
+import System.Random
 
 
 type Continue s = (Value s -> Wisp s (Value s)) -> Wisp s (Value s)
 
 type Symbol = ByteString
 
-type Wisp s a = ReaderT (Env s) (ST s) a
-
-type WispIO a = Wisp RealWorld a
+type Wisp s a = ReaderT (Env s) (WriterT String (ST s)) a
 
 data Env s = Env { toplevel :: Frame s
                  , abort :: String -> Wisp s (Value s)
+                 , input :: String
+                 , randomSeed :: StdGen
                  }
 
-wispErr e = asks abort >>= ($e)
-wispST = ReaderT . const
+wispErr e = asks abort >>= ($ e ++ "\n")
+wispST :: ST s a -> Wisp s a
+wispST = ReaderT . const . WriterT . fmap (,"")
 
 data ArgSpec = Exactly { count :: Int, guards :: forall s. [Value s -> Bool]}
              | AtLeast { count :: Int, guards :: forall s. [Value s -> Bool]}

@@ -4,8 +4,6 @@ import Wisp.Types
 import Text.ParserCombinators.Parsec hiding (count)
 import Control.Applicative hiding ((<|>), many, optional)
 
-import Data.ByteString.Char8 (pack, unpack)
-
 parseWisp :: String -> Either ParseError (Value s)
 parseWisp = parse wisp ""
 

@@ -80,6 +80,7 @@ arguments  = []
 satisfied :: Value s -> Bool
 satisfied Prim{argSpec = as} = count as == 0
 satisfied Fn{params = ps} = length ps == 0
+satisfied v = error $ "satisfied: non-applicable value: " ++ show v
 
 admits :: ArgSpec -> Value s -> Bool
 Exactly 0 _ `admits` _ = False

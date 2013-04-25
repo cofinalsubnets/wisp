@@ -1,7 +1,8 @@
 #!/usr/bin/runhaskell
 import Wisp
-import System.IO
 
-
-main = repl stdin stdout "> " Nothing
+main :: IO ()
+main = interpreter >>= loop
+  where
+    loop i = getLine >>= i >>= putStrLn >> loop i
 
