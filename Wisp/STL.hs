@@ -28,9 +28,9 @@ stl = case parseWisp l of
       , "    `((fn ,(map car binds) @body) @(map cadr binds)))"
 
       , "  (defn member (e lst)"
-      , "    (cond ((null? lst) false)"
+      , "    (cond ((null? lst) #f)"
       , "          ((= (car lst) e) lst)"
-      , "          (true (member e (cdr lst)))))"
+      , "          (#t (member e (cdr lst)))))"
 
       , "  (defn length (l)"
       , "    (if (null? l)"
@@ -80,9 +80,9 @@ stl = case parseWisp l of
       , "  (def cdddr (comp cdr cddr))"
 
       , "  (defn assoc (v l)"
-      , "    (cond ((null? l) false)"
+      , "    (cond ((null? l) #f)"
       , "          ((= v (caar l)) (cadar l))"
-      , "          (true (assoc v (cdr l)))))"
+      , "          (#t (assoc v (cdr l)))))"
 
       , "  (defn map (op l)"
       , "    (if (null? l)"
@@ -95,7 +95,7 @@ stl = case parseWisp l of
       , "          ((p (car l))"
       , "           (cons (car l)"
       , "                 (filter p (cdr l))))"
-      , "          (true (filter p (cdr l)))))"
+      , "          (#t (filter p (cdr l)))))"
 
       , "  (defn fold (op acc l)"
       , "    (if (null? l)"
@@ -107,7 +107,7 @@ stl = case parseWisp l of
       , "     `(,new-car @new-cdr)"
       , "     (error (str \"Bad type: \" new-cdr))))"
 
-      , "  (defn not (v) (if v false true))"
+      , "  (defn not (v) (if v #f #t))"
       , "  (defn && (a b) (if a b a))"
       , "  (defn || (a b) (if a a b))"
       , "  (defm and (& clauses)"
@@ -158,6 +158,29 @@ stl = case parseWisp l of
       , "  (defn join (strs j)"
       , "    (fold (fn (s1 s2) (str s1 j s2)) (car strs) (cdr strs)))"
 
+      , "  (defn println (s) (print s \"\n\"))"
+
+      , "  (defm test (suite & ts)"
+      , "    (if (list? suite)"
+      , "        (set ts (cons suite ts))"
+      , "        (print \"Testing \" suite \" \"))"
+      , "    (defn pass () (print \".\"))"
+      , "    (defn fail () (print \"X\"))"
+      , "    (def failures '())"
+      , "    (map (fn (x)"
+      , "           (let (((doc t) x))"
+      , "             (if (eval t)"
+      , "                 (pass)"
+      , "                 (do (set failures (cons doc failures))"
+      , "                     (fail)))))"
+      , "         ts)"
+      , "    (if (null? failures)"
+      , "      (do (println \" ok!\") #t)"
+      , "      (do"
+      , "        (println (str \"\n\" (length failures) \" failure(s): \"))"
+      , "        (map println failures)"
+      , "        #f)))"
+      , ")"
       , ")"
       ]
 

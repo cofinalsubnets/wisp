@@ -37,7 +37,7 @@ wisp = optional whitespace *> expr <* optional whitespace
 
     atom = str <|> number <|> symbol <|> true <|> false
 
-    escaped c r = try $ string ['\\',c] >> return r
+    escaped c r = try $ string ['\\', c] >> return r
 
     str = Str `fmap` (char '"' *> many stringContents <* char '"')
       where stringContents =  escaped '"' '"'
@@ -66,13 +66,13 @@ wisp = optional whitespace *> expr <* optional whitespace
       where symC = oneOf (['a'..'z'] ++ ['A'..'Z'] ++ "_+-=*/.!?:<>&$^|{}[]%~")
 
     number =  (Flt . read) `fmap` try dec
-          <|> (Int  . read) `fmap` try neg
-          <|> (Int  . read) `fmap` pos
+          <|> (Int . read) `fmap` try neg
+          <|> (Int . read) `fmap` pos
 
       where pos = many1 digit
             neg = (:) <$> char '-' <*> pos
             dec = (++) <$> (pos <|> neg) <*> ((:) <$> char '.' <*> pos)
 
-    true = Bln `fmap` (try (string "#t") >> return True)
-    false = Bln `fmap` (try (string "#f") >> return False)
+    true  = fmap Bln $ try (string "#t") >> return True
+    false = fmap Bln $ try (string "#f") >> return False
 

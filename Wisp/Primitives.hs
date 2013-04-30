@@ -67,9 +67,9 @@ p_str = Prim (anyNumber arguments) $ ylppa . Str . concatMap stringify
     stringify v = show v
 
 -- | call-with-current-continuation
-p_call_cc = Prim (Exactly 1 [applicable]) $ \[a] c -> apply a [cc c] c
+p_call_cc = Prim (Exactly 1 [applicable]) $ \(a:_) -> return . cc >>= apply a
   where
-    cc c = Prim (Exactly 1 arguments) $ \[v] _ -> c v
+    cc c = Prim (Exactly 1 arguments) $ const . c . head
 
 -- | equality
 p_eq = Prim (anyNumber arguments)
@@ -78,9 +78,8 @@ p_eq = Prim (anyNumber arguments)
 -- | apply
 p_apply = Prim (Exactly 2 [applicable, list]) $ \[a, Lst l] -> apply a l
 
-p_eval = Prim (Exactly 1 arguments) $ \[v] c -> do
-  tl <- asks toplevel
-  eval v tl c
+p_eval = Prim (Exactly 1 arguments) $ \[v] c ->
+  asks toplevel >>= \tl -> eval v tl c
 
 -- | integer coercion
 p_int = Prim (Exactly 1 numbers) $ ylppa . intg
@@ -101,14 +100,11 @@ p_arity = Prim (Exactly 1 [function ||| macro])
 p_sym = Prim (Exactly 1 strings) $ \[Str s] -> ylppa (Sym $ pack s)
 
 -- | division
-p_div = Prim (AtLeast 1 numbers) $ \(h:t) c -> case foldM s_div h t of
-  Left err -> wispErr err
-  Right v -> c v
+p_div = Prim (AtLeast 1 numbers) $ \(h:t) c -> either wispErr c $ foldM s_div h t
 
 -- | Parse a string into wisp data.
-p_read = Prim (Exactly 1 strings) $ \[Str s] c -> case parseWisp s of
-  Left err -> wispErr $ show err
-  Right v -> c v
+p_read = Prim (Exactly 1 strings) $ \[Str s] c -> 
+  either (wispErr . show) c $ parseWisp s
 
 
 
@@ -132,9 +128,8 @@ p_get_char = io_get $ \i ->
 
 p_get_input = io_get $ return . (,"")
 
-p_print = Prim (Exactly 1 strings) $ \[str@(Str s)] c -> do
-  tell s
-  c str
+p_print = Prim (anyNumber arguments) $ \args c -> do
+  apply p_str args $ \str@(Str s) -> tell (output s) >> c str
 
 
 -- Math operations.

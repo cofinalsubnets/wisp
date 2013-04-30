@@ -6,6 +6,7 @@ module Wisp.Types
 , Value(..)
 , Frame(..)
 , Form(..)
+, Output(..)
 , wispErr
 , wispST
 , pack
@@ -13,6 +14,7 @@ module Wisp.Types
 , ArgSpec(..)
 , Continue
 , anyNumber
+, output
 ) where
 
 import qualified Data.HashTable.ST.Cuckoo as HT
@@ -22,13 +24,14 @@ import Control.Monad.ST
 import Control.Monad.Reader
 import Control.Monad.Writer
 import System.Random
+import Data.Monoid
 
 
 type Continue s = (Value s -> Wisp s (Value s)) -> Wisp s (Value s)
 
 type Symbol = ByteString
 
-type Wisp s a = ReaderT (Env s) (WriterT String (ST s)) a
+type Wisp s a = ReaderT (Env s) (WriterT (Output Char) (ST s)) a
 
 data Env s = Env { toplevel :: Frame s
                  , abort :: String -> Wisp s (Value s)
@@ -36,9 +39,17 @@ data Env s = Env { toplevel :: Frame s
                  , randomSeed :: StdGen
                  }
 
+newtype Output a = Output ([a] -> [a])
+
+instance Monoid (Output a) where
+  mempty = Output id
+  mappend (Output a) (Output b) = Output $ a . b
+
+output = Output . (++)
+
 wispErr e = asks abort >>= ($ e ++ "\n")
 wispST :: ST s a -> Wisp s a
-wispST = ReaderT . const . WriterT . fmap (,"")
+wispST = ReaderT . const . WriterT . fmap (,mempty)
 
 data ArgSpec = Exactly { count :: Int, guards :: forall s. [Value s -> Bool]}
              | AtLeast { count :: Int, guards :: forall s. [Value s -> Bool]}
