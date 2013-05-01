@@ -1,5 +1,5 @@
 -- simple embedded wisp interpreters
-module Wisp
+module Wisp.Interpreter
 ( interpreter
 , interpreter'
 ) where
@@ -16,6 +16,10 @@ import System.Random
 type Interpreter m = String -> m String
 
 
+interpreter :: IO (Interpreter IO)
+interpreter = newStdGen >>= stToIO . interpreter' >>= return . (stToIO.)
+
+
 interpreter' :: StdGen -> ST s (Interpreter (ST s))
 interpreter' gen = do
   tl <- mkToplevel
@@ -24,17 +28,13 @@ interpreter' gen = do
 
   (rep,_) <- runWriterT $ runReaderT (eval val tl return) env
 
-  let terp v = fmap (getOutput . snd) . runWriterT $ runReaderT (apply rep [Str v] return) env
-  return terp
+  return $ \v ->
+    fmap (show . snd) . runWriterT $
+    runReaderT (apply rep [Str v] return) env
 
   where
-    getOutput (Output o) = o ""
-
     reportError s = do
       tell $ output s
       return $ Str s
 
-
-interpreter :: IO (Interpreter IO)
-interpreter = newStdGen >>= stToIO . interpreter' >>= return . (stToIO.)
 

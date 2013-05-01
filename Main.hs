@@ -1,6 +1,6 @@
 module Main where
 
-import Wisp
+import Wisp.Interpreter
 import System.Console.GetOpt
 import System.Environment
 import System.Exit

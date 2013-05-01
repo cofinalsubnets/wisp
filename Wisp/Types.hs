@@ -1,4 +1,4 @@
-{-# LANGUAGE RankNTypes, TupleSections #-}
+{-# LANGUAGE RankNTypes, TupleSections, FlexibleInstances #-}
 module Wisp.Types
 ( Wisp
 , Env(..)
@@ -45,9 +45,16 @@ instance Monoid (Output a) where
   mempty = Output id
   mappend (Output a) (Output b) = Output $ a . b
 
+instance Show (Output Char) where
+  show (Output o) = o ""
+
+output :: [a] -> Output a
 output = Output . (++)
 
+
+wispErr :: String -> Wisp s (Value s)
 wispErr e = asks abort >>= ($ e ++ "\n")
+
 wispST :: ST s a -> Wisp s a
 wispST = ReaderT . const . WriterT . fmap (,mempty)
 

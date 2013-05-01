@@ -1,6 +1,6 @@
 wisp
 ====
-wisp is a tiny interpreted lisp written is haskell & easily embedded into larger haskell programs as, e.g., a scripting language. it includes a superset of the following features:
+wisp is a tiny interpreted lisp written is haskell & easily embedded into larger haskell programs, e.g., as a scripting language. it includes a superset of the following features:
 
 - full lexical closures
 - tail-call optimization

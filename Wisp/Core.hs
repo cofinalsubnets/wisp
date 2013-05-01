@@ -1,13 +1,8 @@
 {-# LANGUAGE TupleSections #-}
-module Wisp.Core
-( eval
-, apply
-, lookup
-) where
+module Wisp.Core (eval, apply) where
 
 import Wisp.Types
 import Wisp.Predicates
-import Prelude hiding (lookup)
 import qualified Data.HashTable.ST.Cuckoo as H
 import Data.HashTable.Class (fromList)
 import Control.Monad
@@ -17,55 +12,51 @@ import Control.Monad.Reader
 eval :: Value s -- the thing being evaluated
      -> Frame s -- the evaluation context
      -> Continue s
-eval v f cont = case v of
- Sym s -> lookup s f cont
- Lst (SF m:ps) -> specialForm m ps f cont
- Lst (o:ps) -> eval o f $ \o' ->
-   if macro o' then apply o' ps $ \r -> eval r f cont
-   else let evalArgs []     ps' = apply o' (reverse ps') cont
-            evalArgs (a:as) ps' = eval a f $ \a' -> evalArgs as (a':ps')
-        in evalArgs ps []
- _ -> cont v
+
+eval (Sym s) f c = findBinding s f >>= maybe nameError (c . fst)
+  where
+    nameError = wispErr $ "ERROR: unable to resolve symbol: " ++ unpack s
+
+eval (Lst (SF m:ps)) f c = specialForm m ps f c
+
+eval (Lst (o:ps)) f c = eval o f go
+  where
+    go fn = if macro fn then apply fn ps $ \r -> eval r f c
+            else evalArgs fn ps []
+
+    evalArgs fn []     es = apply fn (reverse es) c
+    evalArgs fn (a:as) es = eval a f $ evalArgs fn as . (:es)
+
+eval v _ c = c v
+
 
 
 apply :: Value s   -- the value being applied
       -> [Value s] -- the arguments
       -> Continue s
-apply proc args cont
- | primitive proc = apC proc args
- | applicable proc = either wispErr funcall $ destructure (Lst bound) (Lst args)
- | otherwise = wispErr $ "ERROR: non-applicable value: " ++ show proc
 
+apply p@Prim{} []
+ | satisfied p = call p []
+ | otherwise = ($p)
+
+apply p@Prim{argSpec = spec} (a:as)
+ | spec `admits` a = Prim admit (call p . (a:)) `apply` as
+ | otherwise = const $ wispErr $ "ERROR: bad type: " ++ show a
  where
-  (bound, unbound) = if length args >= nPos then (params proc,[])
-                     else splitAt (length args) (params proc)
-  nPos = length . fst . posVarArgs $ params proc
+   admit = spec {count = max 0 (pred $ count spec), guards = drop 1 $ guards spec}
 
-  funcall kvs = do
-    f <- mkFrame (Just $ closure proc) kvs
-    invoke proc{params = unbound, closure = f} cont
-
-  invoke pr
-   | satisfied pr = case pr of
-     Prim{} -> call pr []
-     Fn{closure = cl, body = b} -> eval b cl
-   | otherwise = ($pr)
-
-  p `apC` [] = invoke p cont
-  Prim as p `apC` (arg:args)
-   | as `admits` arg = Prim admit (p . (arg:)) `apC` args
-   | otherwise = wispErr $ "ERROR: bad type: " ++ show arg
-   where
-     admit = as {count = max 0 (pred $ count as), guards = drop 1 $ guards as}
-
-  mkFrame p = wispST . fromList >=> return . F p
-
-
--- | Name resolution.
-lookup :: Symbol -> Frame s -> Continue s
-lookup k f c = findBinding k f >>= maybe nameError (c . fst)
+apply fn@Fn{} as = either (const . wispErr) funcall $ destructure (Lst bound) (Lst as)
   where
-    nameError = wispErr $ "ERROR: unable to resolve symbol: " ++ unpack k
+    funcall kvs c = do
+      f <- wispST (fromList kvs) >>= return . F (Just $ closure fn)
+      let fn' = fn{params = unbound, closure = f}
+      if satisfied fn' then eval (body fn') f c else c fn'
+
+    (bound, unbound) = if length as >= nPos then (params fn, [])
+                       else splitAt (length as) (params fn)
+    nPos = length . fst . posVarArgs $ params fn
+
+apply v _ = const . wispErr $ "ERROR: can't apply value: " ++ show v
 
 
 -- helper fns
@@ -82,14 +73,15 @@ destructure l0@(Lst l) v0@(Lst v)
  | (req, Just s) <- posVarArgs l = do
    let (pn,vn) = splitAt (length req) v
    pos <- destructure (Lst req) (Lst pn)
-   fmap (++pos) $ destructure s (Lst vn)
+   var <- destructure s (Lst vn)
+   return $ var ++ pos
  | length l == length v = fmap concat . sequence $ zipWith destructure l v
  | otherwise = structError l0 v0
 
 destructure p v = structError p v
 
 structError p v = Left . unwords $
-  [ "Pattern error: structure mismatch:" , show p , "<-" , show v ]
+  [ "ERROR: structure mismatch in pattern:" , show p , "<-" , show v ]
 
 
 -- | Search for a binding visible from a frame. Return the value and the
@@ -106,7 +98,7 @@ findBinding nm f = wispST (H.lookup (bindings f) nm)
 posVarArgs :: [Value s] -> ([Value s], Maybe (Value s))
 posVarArgs p = case break (== Sym (pack "&")) p of
   (ps,_:v:_) -> (ps, Just v)
-  (ps,_)     -> (ps, Nothing)
+  _          -> (p, Nothing)
 
 
 -- | Special form handler.
@@ -115,8 +107,8 @@ specialForm :: Form       -- the special form
             -> Frame s    -- the calling context
             -> Continue s -- continuation
 
-specialForm Do [p] f c = eval p f c
-specialForm Do (p:ps) f c = eval p f $ \_ -> specialForm Do ps f c
+specialForm Do (p:ps) f c = eval p f $
+  if null ps then c else const (specialForm Do ps f c)
 
 specialForm If [cond,y,n] f c = eval cond f $ \res ->
   eval (if res == Bln False then n else y) f c
@@ -145,17 +137,24 @@ specialForm Merge _ _ _ = wispErr "ERROR: merge outside quasiquoted expression"
 specialForm Def [s, xp] f c = eval xp f $ \v ->
   either wispErr (def v) $ destructure s v
   where
+    bindV = uncurry $ H.insert $ bindings f
     def v kvs = do
-      wispST $ mapM_ (uncurry $ H.insert $ bindings f) kvs
+      wispST $ mapM_ bindV kvs
       c v
 
-specialForm Set [Sym s, xp] f c = findBinding s f >>= \tf -> case tf of
-  Just (_,tf') -> eval xp f $ \v -> wispST (H.insert (bindings tf') s v) >> c v
-  _ -> wispErr $ "ERROR: set: free or immutable variable: " ++ unpack s
+specialForm Set [Sym s, xp] f c = findBinding s f >>= maybe nameError setV
+  where
+    nameError = wispErr $ "ERROR: set: free or immutable variable: " ++ unpack s
+    setV (_, tf) = eval xp f $ \v -> do
+      wispST $ H.insert (bindings tf) s v
+      c v
 
-specialForm Undef [Sym s] f c = findBinding s f >>= \tf -> case tf of
-  Just (_,tf') -> wispST (H.delete (bindings tf') s) >> c (Bln True)
-  _ -> wispErr $ "ERROR: undef: free or immutable variable: " ++ unpack s
+specialForm Undef [Sym s] f c = findBinding s f >>= maybe nameError unbind
+  where
+    nameError = wispErr $ "ERROR: undef: free or immutable variable: " ++ unpack s
+    unbind (v, tf) = do
+      wispST $ H.delete (bindings tf) s
+      c v
 
 specialForm Catch (handler:xps) f c = eval handler f $ \h ->
   let h' e = apply h [Str e] c in
